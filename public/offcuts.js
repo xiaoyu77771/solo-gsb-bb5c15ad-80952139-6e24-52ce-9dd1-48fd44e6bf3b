@@ -3,7 +3,19 @@
 /*
  * 余料库存与复用预占页面（独立脚本，通过全局 layoutLatestResult
  * 与 app.js 共享最近一次裁切试排 / 排产 / 比选结果）。
+ *
+ * 安全：纸型名、订单号、批次号、单据号等均为用户录入的动态值，会进入
+ * 列表、预占明细与复用结果。所有拼入 innerHTML 的动态值必须按上下文经
+ * escape.js 的 ocEscapeHtml（文本）/ ocEscapeAttr（属性）转义，
+ * 避免存储型脚本注入。
  */
+
+// 浏览器中由先加载的 escape.js 挂到 window；Node 测试环境走 require。
+const ocEsc = (typeof module !== 'undefined' && module.exports)
+  ? require('./escape')
+  : window;
+const ocEscapeHtml = ocEsc.ocEscapeHtml;
+const ocEscapeAttr = ocEsc.ocEscapeAttr;
 
 const OC$ = (id) => document.getElementById(id);
 
@@ -142,7 +154,7 @@ async function ocRefresh() {
   try {
     data = await ocApi(`/api/offcuts?${params.toString()}`);
   } catch (e) {
-    OC$('ocListWrap').innerHTML = `<div class="form-error">${e.message}</div>`;
+    OC$('ocListWrap').innerHTML = `<div class="form-error">${ocEscapeHtml(e.message)}</div>`;
     return;
   }
   ocRenderSummary(data.summary);
@@ -162,44 +174,56 @@ function ocRenderSummary(s) {
 
 function ocSourceText(o) {
   const src = o.source || {};
-  const typeLabel = {
+  // src.type 为枚举值（single/batch/cost/manual），未识别时原样转义输出；
+  // sheetIndex/round 已由服务端转为数字。批次号为用户录入，必须转义。
+  const typeLabelRaw = {
     single: '单张/比选', batch: '批量', cost: '多纸型', manual: '手工',
-  }[src.type] || src.type || '—';
+  }[src.type] || (src.type == null ? '' : src.type);
+  const typeLabel = typeLabelRaw || '—';
   const sheet = src.sheetIndex ? ` · 第${src.sheetIndex}张` : '';
   const round = src.round ? ` · 轮次${src.round}` : '';
-  return `${typeLabel}${sheet}${round} · 批次 ${src.batchId || '—'}`;
+  return `${ocEscapeHtml(typeLabel)}${sheet}${round} · 批次 ${ocEscapeHtml(src.batchId || '—')}`;
 }
 
-function ocRenderList(list) {
-  const wrap = OC$('ocListWrap');
-  if (!list.length) {
-    wrap.innerHTML = '<div class="placeholder">没有符合条件的余料。可在「裁切试排」页把排料结果的余料登记入库，或在左侧手工录入。</div>';
-    return;
-  }
-  const rows = list.map((o) => {
-    const reserved = o.status === 'reserved';
-    const r = o.reservation || null;
-    return `
+function ocGrainPaperLabel(grain) {
+  return OC_GRAIN_PAPER[grain] || (grain == null ? grain : ocEscapeHtml(grain));
+}
+
+function ocGrainReqLabel(grain) {
+  return OC_GRAIN_REQ[grain] || (grain == null ? grain : ocEscapeHtml(grain));
+}
+
+function ocOffcutRowHtml(o) {
+  const reserved = o.status === 'reserved';
+  const r = o.reservation || null;
+  // 余料编号、纸型名、批次/订单号、单据号均为服务端回传的动态值，统一转义
+  return `
       <tr class="${reserved ? 'oc-row-reserved' : 'oc-row-available'}">
-        <td><b>${o.id}</b></td>
-        <td>${o.paperName ? o.paperName : '<span class="ord-null">未命名</span>'}</td>
+        <td><b>${ocEscapeHtml(o.id)}</b></td>
+        <td>${o.paperName ? ocEscapeHtml(o.paperName) : '<span class="ord-null">未命名</span>'}</td>
         <td class="num">${ocFmt(o.w)}×${ocFmt(o.h)}</td>
         <td class="num">${ocFmt(o.area)}</td>
         <td class="num">${ocFmt(o.paperWidth)}×${ocFmt(o.paperHeight)}</td>
-        <td>${OC_GRAIN_PAPER[o.paperGrain] || o.paperGrain}</td>
+        <td>${ocGrainPaperLabel(o.paperGrain)}</td>
         <td class="num">${ocFmt(o.kerf)}</td>
         <td class="num">(${ocFmt(o.x)}, ${ocFmt(o.y)})</td>
-        <td class="oc-source">${ocSourceText(o)}${o.source.orderNo ? ` · 订单 ${o.source.orderNo}` : ''}</td>
+        <td class="oc-source">${ocSourceText(o)}${o.source.orderNo ? ` · 订单 ${ocEscapeHtml(o.source.orderNo)}` : ''}</td>
         <td>${reserved
           ? `<span class="oc-status oc-status-reserved">已预占</span>
-             <div class="oc-res-info">单号 <b>${r.allocationId}</b><br />
+             <div class="oc-res-info">单号 <b>${ocEscapeHtml(r.allocationId)}</b><br />
                成品 ${ocFmt(r.product.width)}×${ocFmt(r.product.height)}
-               （${OC_GRAIN_REQ[r.product.grain] || r.product.grain}${r.rotated ? ' · 旋转90°' : ''}）
-               ${r.ref ? `<br />单据 ${r.ref}` : ''}</div>`
+               （${ocGrainReqLabel(r.product.grain)}${r.rotated ? ' · 旋转90°' : ''}）
+               ${r.ref ? `<br />单据 ${ocEscapeHtml(r.ref)}` : ''}</div>`
           : '<span class="oc-status oc-status-available">可用</span>'}</td>
       </tr>`;
-  }).join('');
-  wrap.innerHTML = `
+}
+
+function ocListHtml(list) {
+  if (!list.length) {
+    return '<div class="placeholder">没有符合条件的余料。可在「裁切试排」页把排料结果的余料登记入库，或在左侧手工录入。</div>';
+  }
+  const rows = list.map(ocOffcutRowHtml).join('');
+  return `
     <table class="oc-table">
       <thead><tr>
         <th>余料编号</th><th>纸型</th><th class="num">余料 宽×高 (mm)</th>
@@ -211,15 +235,15 @@ function ocRenderList(list) {
     </table>`;
 }
 
+function ocRenderList(list) {
+  OC$('ocListWrap').innerHTML = ocListHtml(list);
+}
+
 /* ---------------- 预占单分组与释放 ---------------- */
 
-function ocRenderAllocations(list) {
-  const box = OC$('ocAllocations');
+function ocAllocationsHtml(list) {
   const reserved = list.filter((o) => o.status === 'reserved');
-  if (!reserved.length) {
-    box.innerHTML = '';
-    return;
-  }
+  if (!reserved.length) return '';
   const groups = new Map();
   for (const o of reserved) {
     const aid = o.reservation.allocationId;
@@ -230,23 +254,28 @@ function ocRenderAllocations(list) {
     const r0 = items[0].reservation;
     const chips = items.map((o) => `
       <span class="oc-chip" title="${ocSourceText(o)}">
-        ${o.id} · ${ocFmt(o.w)}×${ocFmt(o.h)}${o.reservation.rotated ? ' ⟳' : ''}
+        ${ocEscapeHtml(o.id)} · ${ocFmt(o.w)}×${ocFmt(o.h)}${o.reservation.rotated ? ' ⟳' : ''}
       </span>`).join('');
     return `
       <div class="oc-alloc-group">
         <div class="oc-alloc-head">
-          <span>预占单 <b>${aid}</b></span>
+          <span>预占单 <b>${ocEscapeHtml(aid)}</b></span>
           <span>成品 <b>${ocFmt(r0.product.width)}×${ocFmt(r0.product.height)}</b> mm
-            （${OC_GRAIN_REQ[r0.product.grain] || r0.product.grain}）</span>
+            （${ocGrainReqLabel(r0.product.grain)}）</span>
           <span>占用 <b>${items.length}</b> 块</span>
-          ${r0.ref ? `<span>单据：<b>${r0.ref}</b></span>` : ''}
-          <span class="oc-alloc-time">${new Date(r0.createdAt).toLocaleString('zh-CN')}</span>
-          <button type="button" class="btn btn-ghost oc-release" data-allocation="${aid}">释放该预占</button>
+          ${r0.ref ? `<span>单据：<b>${ocEscapeHtml(r0.ref)}</b></span>` : ''}
+          <span class="oc-alloc-time">${ocEscapeHtml(new Date(r0.createdAt).toLocaleString('zh-CN'))}</span>
+          <button type="button" class="btn btn-ghost oc-release" data-allocation="${ocEscapeAttr(aid)}">释放该预占</button>
         </div>
         <div class="oc-chips">${chips}</div>
       </div>`;
   }).join('');
-  box.innerHTML = `<h3>已预占余料（按预占单分组）</h3>${blocks}`;
+  return `<h3>已预占余料（按预占单分组）</h3>${blocks}`;
+}
+
+function ocRenderAllocations(list) {
+  const box = OC$('ocAllocations');
+  box.innerHTML = ocAllocationsHtml(list);
   box.querySelectorAll('.oc-release').forEach((btn) =>
     btn.addEventListener('click', () => ocRelease({ allocationIds: [btn.dataset.allocation] })));
 }
@@ -293,25 +322,28 @@ async function ocAllocate() {
   }
 }
 
-function ocShowAllocationResult(data) {
-  const box = OC$('alMsg');
-  box.className = data.allocated ? 'form-ok' : 'form-error';
+function ocAllocationResultHtml(data) {
   if (data.allocated) {
-    box.innerHTML = `✔ 已原子预占 <b>${data.reservedCount}</b> 块余料，预占单号
-      <b>${data.allocationId}</b>${data.request.ref ? `（单据 ${data.request.ref}）` : ''}；
+    return `✔ 已原子预占 <b>${data.reservedCount}</b> 块余料，预占单号
+      <b>${ocEscapeHtml(data.allocationId)}</b>${data.request.ref ? `（单据 ${ocEscapeHtml(data.request.ref)}）` : ''}；
       可行候选共 ${data.feasibleCount} 块。`;
-  } else {
-    const cand = data.candidates.length
-      ? `当前可行余料仅 <b>${data.feasibleCount}</b> 块：${data.candidates
-        .map((c) => `${c.paperName || c.offcutId}（${ocFmt(c.width)}×${ocFmt(c.height)}${c.rotated ? '·旋转' : ''}）`)
-        .join('、')}。`
-      : '当前没有任何可行余料。';
-    box.innerHTML = `⚠ 库存不足：需求 <b>${data.request.quantity}</b> 块，可行仅
+  }
+  const cand = data.candidates.length
+    ? `当前可行余料仅 <b>${data.feasibleCount}</b> 块：${data.candidates
+      .map((c) => `${ocEscapeHtml(c.paperName || c.offcutId)}（${ocFmt(c.width)}×${ocFmt(c.height)}${c.rotated ? '·旋转' : ''}）`)
+      .join('、')}。`
+    : '当前没有任何可行余料。';
+  return `⚠ 库存不足：需求 <b>${data.request.quantity}</b> 块，可行仅
       <b>${data.feasibleCount}</b> 块，<b>缺口 ${data.shortfall} 块</b>。
       未扣减任何已占用记录。${cand}<br />
       受阻统计：尺寸不足 ${data.blockedBySize} 块、纹向受限 ${data.blockedByGrain} 块、
       已被预占 ${data.unavailableReserved} 块。`;
-  }
+}
+
+function ocShowAllocationResult(data) {
+  const box = OC$('alMsg');
+  box.className = data.allocated ? 'form-ok' : 'form-error';
+  box.innerHTML = ocAllocationResultHtml(data);
   box.hidden = false;
 }
 
@@ -328,31 +360,43 @@ function ocUpdateNavBadge(summary) {
   }
 }
 
-/* ---------------- 事件绑定 ---------------- */
+/* ---------------- 事件绑定（仅浏览器环境） ---------------- */
 
-OC$('navLayout').addEventListener('click', () => ocShowView('layout'));
-OC$('navOffcuts').addEventListener('click', () => ocShowView('offcuts'));
-OC$('ingestBtn').addEventListener('click', ocIngestCurrent);
-OC$('ocCreate').addEventListener('click', ocCreate);
-OC$('alCreate').addEventListener('click', ocAllocate);
-OC$('ocRefresh').addEventListener('click', ocRefresh);
-document.querySelectorAll('input[name="ocStatus"]').forEach((r) =>
-  r.addEventListener('change', ocRefresh));
-['qMinW', 'qMinH'].forEach((id) =>
-  OC$(id).addEventListener('change', ocRefresh));
-OC$('qGrain').addEventListener('change', ocRefresh);
-let ocKwTimer = null;
-OC$('qKw').addEventListener('input', () => {
-  clearTimeout(ocKwTimer);
-  ocKwTimer = setTimeout(ocRefresh, 300);
-});
+if (typeof document !== 'undefined') {
+  OC$('navLayout').addEventListener('click', () => ocShowView('layout'));
+  OC$('navOffcuts').addEventListener('click', () => ocShowView('offcuts'));
+  OC$('ingestBtn').addEventListener('click', ocIngestCurrent);
+  OC$('ocCreate').addEventListener('click', ocCreate);
+  OC$('alCreate').addEventListener('click', ocAllocate);
+  OC$('ocRefresh').addEventListener('click', ocRefresh);
+  document.querySelectorAll('input[name="ocStatus"]').forEach((r) =>
+    r.addEventListener('change', ocRefresh));
+  ['qMinW', 'qMinH'].forEach((id) =>
+    OC$(id).addEventListener('change', ocRefresh));
+  OC$('qGrain').addEventListener('change', ocRefresh);
+  let ocKwTimer = null;
+  OC$('qKw').addEventListener('input', () => {
+    clearTimeout(ocKwTimer);
+    ocKwTimer = setTimeout(ocRefresh, 300);
+  });
 
-window.ocRefreshOffcuts = ocRefresh;
+  window.ocRefreshOffcuts = ocRefresh;
 
-// 页面初始加载库存角标（服务重启后库存为空则不显示）
-(async function initBadge() {
-  try {
-    const data = await ocApi('/api/offcuts');
-    ocUpdateNavBadge(data.summary);
-  } catch (_) { /* 服务暂不可用时静默 */ }
-})();
+  // 页面初始加载库存角标（服务重启后库存为空则不显示）
+  (async function initBadge() {
+    try {
+      const data = await ocApi('/api/offcuts');
+      ocUpdateNavBadge(data.summary);
+    } catch (_) { /* 服务暂不可用时静默 */ }
+  })();
+}
+
+// 纯字符串构造函数在 Node 测试中导出（回归校验动态值渲染转义）
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = {
+    ocListHtml,
+    ocAllocationsHtml,
+    ocAllocationResultHtml,
+    ocSourceText,
+  };
+}
