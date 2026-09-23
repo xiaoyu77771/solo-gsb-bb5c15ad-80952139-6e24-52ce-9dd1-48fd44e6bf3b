@@ -186,8 +186,10 @@ app.post('/api/offcuts/release', (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`单张纸裁切试排服务已启动: http://localhost:${PORT}`);
-});
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`单张纸裁切试排服务已启动: http://localhost:${PORT}`);
+  });
+}
 
 module.exports = app;
